@@ -1,79 +1,45 @@
-// news-image-20261122 entrypoint (Node 22, standard library only).
-//
-// The entry is the broadsheet in entry.png, drawn by tools/render22.py
-// from news.json and three CC-licensed file photos. This program does
-// not draw anything: it checks the image the repository ships against
-// the competition's limits, then writes it to the grader's output
-// directory as entry.png. It reads no clock and no network, and it
-// writes nothing but that one file, so running it twice produces the
-// same bytes both times.
-//
-// Outside the grader, MAKEFUN_OUTPUT_DIR stands in for /output:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+// main.ts — hand in THE WORLD TODAY for make.fun's news-image-20261122.
+// Validates entry.png (PNG signature, 680x1024, at most 1 MiB, whole file
+// ending in IEND) and copies it to the output directory the grader reads
+// from (MAKEFUN_OUTPUT_DIR outside the grader, /output inside it).
+// Node 22, standard library only.
+import { copyFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { join, resolve } from "node:path";
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const MAX_BYTES = 1048576;
+const WANT_W = 680;
+const WANT_H = 1024;
 
-const SOURCE = new URL("./entry.png", import.meta.url);
-const DEST_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? "/output";
-const DEST = join(DEST_DIR, "entry.png");
-
-// Competition limits for news-image-20261122.
-const LIMITS = {
-  maxBytes: 1024 * 1024,
-  maxSide: 1024,
-  width: 680,
-  height: 1024,
-};
-
-// PNG magic: 89 50 4E 47 0D 0A 1A 0A.
-const SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-// A whole PNG ends with the IEND chunk: length 0, type "IEND",
-// CRC ae 42 60 82.
-const TRAILER = Buffer.from([
-  0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
-]);
-
-function fail(reason) {
-  throw new Error(`entry.png rejected: ${reason}`);
+function fail(msg: string): never {
+  throw new Error(`entry.png invalid: ${msg}`);
 }
 
-function pngSize(bytes) {
-  // The IHDR chunk holds width at bytes 16..19 and height at 20..23,
-  // both big-endian unsigned 32-bit.
-  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+const here = resolve(import.meta.dirname);
+const src = join(here, "entry.png");
+const buf = readFileSync(src);
+
+if (buf.length > MAX_BYTES) fail(`too large: ${buf.length} bytes (max ${MAX_BYTES})`);
+if (buf.length < 8 || !buf.subarray(0, 8).equals(PNG_SIG)) fail("bad PNG signature");
+if (buf.length < 33 || buf.toString("ascii", 12, 16) !== "IHDR") fail("no IHDR chunk");
+const w = buf.readUInt32BE(16);
+const h = buf.readUInt32BE(20);
+if (w !== WANT_W || h !== WANT_H) fail(`dimensions ${w}x${h}, expected ${WANT_W}x${WANT_H}`);
+const tail = buf.subarray(buf.length - 12);
+if (tail.readUInt32BE(0) !== 0 || tail.toString("ascii", 4, 8) !== "IEND") {
+  fail("file does not end with an IEND chunk");
 }
 
-function validate(bytes) {
-  if (bytes.length > LIMITS.maxBytes) {
-    fail(`is ${bytes.length} bytes, over the ${LIMITS.maxBytes} cap`);
-  }
-  if (bytes.length < SIGNATURE.length ||
-      !bytes.subarray(0, SIGNATURE.length).equals(SIGNATURE)) {
-    fail("does not start with the PNG signature");
-  }
-  if (bytes.length < TRAILER.length ||
-      !bytes.subarray(bytes.length - TRAILER.length).equals(TRAILER)) {
-    fail("does not end with the PNG IEND chunk");
-  }
-  const { width, height } = pngSize(bytes);
-  if (width > LIMITS.maxSide || height > LIMITS.maxSide) {
-    fail(`is ${width}x${height}, over the ${LIMITS.maxSide}x${LIMITS.maxSide} cap`);
-  }
-  if (width !== LIMITS.width || height !== LIMITS.height) {
-    fail(`is ${width}x${height}, expected ${LIMITS.width}x${LIMITS.height}`);
-  }
+const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? "/output";
+mkdirSync(outDir, { recursive: true });
+const dest = join(outDir, "entry.png");
+copyFileSync(src, dest);
+// Verify the copy landed whole: same bytes, same size.
+const copied = readFileSync(dest);
+const digest = (b: Buffer) => createHash("sha256").update(b).digest("hex");
+if (copied.length !== buf.length || digest(copied) !== digest(buf)) {
+  fail("copied file does not match entry.png");
 }
-
-function run() {
-  if (!existsSync(SOURCE)) {
-    fail("missing from the repository");
-  }
-  const bytes = readFileSync(SOURCE);
-  validate(bytes);
-  mkdirSync(DEST_DIR, { recursive: true });
-  writeFileSync(DEST, bytes);
-  console.log(`wrote ${DEST} (${bytes.length} bytes, ${LIMITS.width}x${LIMITS.height})`);
-}
-
-run();
+const size = statSync(dest).size;
+console.log(`entry.png ${w}x${h} ${size} bytes sha256 ${digest(buf)} -> ${dest}`);
